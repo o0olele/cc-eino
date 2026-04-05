@@ -14,7 +14,6 @@ import (
 )
 
 const (
-	apiKey  = "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"
 	baseURL = "https://openrouter.ai/api/v1"
 	modelID = "qwen/qwen3.6-plus:free"
 )
@@ -22,7 +21,7 @@ const (
 func newModel() (model.ToolCallingChatModel, error) {
 	ctx := context.Background()
 	return openai.NewChatModel(ctx, &openai.ChatModelConfig{
-		APIKey:  apiKey,
+		APIKey:  os.Getenv("OPENAI_API_KEY"),
 		Model:   modelID,
 		BaseURL: baseURL,
 	})
