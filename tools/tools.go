@@ -3,12 +3,14 @@ package tools
 import (
 	"context"
 
+	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 )
 
 // Registry holds all registered tools and provides lookup by name.
 type Registry struct {
 	Infos    []*schema.ToolInfo
+	entries  []entry
 	handlers map[string]func(context.Context, string) (string, error)
 }
 
@@ -33,44 +35,57 @@ func (e *UnknownToolError) Error() string {
 // entry is an internal helper for building the registry.
 type entry struct {
 	name string
-	info func(context.Context) (*schema.ToolInfo, error)
+	tool tool.BaseTool
+	info *schema.ToolInfo
 	run  func(context.Context, string) (string, error)
 }
 
 // NewRegistry builds a Registry from all available tools.
 func NewRegistry(ctx context.Context) (*Registry, error) {
-	glob := GlobTool{}
-	grep := GrepTool{}
-	bash := BashTool{}
-
-	entries := []entry{
-		{
-			name: glob.Name(),
-			info: glob.Info,
-			run:  func(c context.Context, args string) (string, error) { return glob.InvokableRun(c, args) },
-		},
-		{
-			name: grep.Name(),
-			info: grep.Info,
-			run:  func(c context.Context, args string) (string, error) { return grep.InvokableRun(c, args) },
-		},
-		{
-			name: bash.Name(),
-			info: bash.Info,
-			run:  func(c context.Context, args string) (string, error) { return bash.InvokableRun(c, args) },
-		},
-	}
 
 	r := &Registry{
-		handlers: make(map[string]func(context.Context, string) (string, error), len(entries)),
+		handlers: make(map[string]func(context.Context, string) (string, error)),
 	}
-	for _, e := range entries {
-		info, err := e.info(ctx)
-		if err != nil {
-			return nil, err
-		}
-		r.Infos = append(r.Infos, info)
-		r.handlers[e.name] = e.run
-	}
+
+	r.Register(ctx, GrepTool{}, func(ctx context.Context, s string) (string, error) {
+		var tool GrepTool
+		return tool.InvokableRun(ctx, s)
+	})
+
+	r.Register(ctx, BashTool{}, func(ctx context.Context, s string) (string, error) {
+		var tool BashTool
+		return tool.InvokableRun(ctx, s)
+	})
+
+	r.Register(ctx, GlobTool{}, func(ctx context.Context, s string) (string, error) {
+		var tool GlobTool
+		return tool.InvokableRun(ctx, s)
+	})
+
 	return r, nil
+}
+
+func (r *Registry) Register(ctx context.Context, tool tool.BaseTool, f func(context.Context, string) (string, error)) {
+	info, err := tool.Info(ctx)
+	if err != nil {
+		panic(err)
+	}
+	r.Infos = append(r.Infos, info)
+	r.handlers[info.Name] = f
+	r.entries = append(r.entries, entry{
+		name: info.Name,
+		tool: tool,
+		info: info,
+		run:  f,
+	})
+}
+
+func (r *Registry) CollectTools(filter func(info *schema.ToolInfo) bool) []tool.BaseTool {
+	var tools []tool.BaseTool
+	for _, e := range r.entries {
+		if filter(e.info) {
+			tools = append(tools, e.tool)
+		}
+	}
+	return tools
 }
