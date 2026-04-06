@@ -57,6 +57,20 @@ func main() {
 		return todoMgr.Update(input.Items)
 	})
 
+	skillLoader, result := NewSkillLoader(workDir)
+	println(result.String())
+	println(skillLoader.Descriptions())
+
+	toolRegistry.Register(ctx, NewSkillTool(skillLoader), func(ctx context.Context, args string) (string, error) {
+		input := SkillToolInput{}
+		err := json.Unmarshal([]byte(args), &input)
+		if err != nil {
+			return "", err
+		}
+
+		return skillLoader.Load(input.Name), nil
+	})
+
 	backend, err := localbk.NewBackend(ctx, &localbk.Config{})
 	if err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, err)
@@ -66,7 +80,8 @@ func main() {
 	sysPrompt := fmt.Sprintf(`You are a coding agent at %s. 
 Use the todo tool to plan multi-step tasks. Mark in_progress before starting, completed when done.
 Use the agent tool to delegate exploration or subtasks.
-Prefer tools over prose.`, workDir)
+Prefer tools over prose.Use load_skill for specialized knowledge.
+Skills: %s`, workDir, skillLoader.Descriptions())
 
 	history := []*schema.Message{
 		schema.SystemMessage(sysPrompt),
