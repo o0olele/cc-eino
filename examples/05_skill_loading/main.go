@@ -63,7 +63,7 @@ func main() {
 
 	toolRegistry.Register(ctx, NewSkillTool(skillLoader), func(ctx context.Context, args string) (string, error) {
 		input := SkillToolInput{}
-		err := json.Unmarshal([]byte(args), &input)
+		err = json.Unmarshal([]byte(args), &input)
 		if err != nil {
 			return "", err
 		}
