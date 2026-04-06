@@ -10,24 +10,89 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync/atomic"
 
 	localbk "github.com/cloudwego/eino-ext/adk/backend/local"
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/prebuilt/deep"
+	"github.com/cloudwego/eino/callbacks"
+	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
 
+type TokenCounter struct {
+	PromptTokens     int64
+	CompletionTokens int64
+	TotalTokens      int64
+}
+
+func (t *TokenCounter) Add(prompt, completion, total int64) {
+	atomic.AddInt64(&t.PromptTokens, int64(prompt))
+	atomic.AddInt64(&t.CompletionTokens, int64(completion))
+	atomic.AddInt64(&t.TotalTokens, int64(total))
+}
+
+func (t *TokenCounter) String() string {
+	return fmt.Sprintf("Tokens - Prompt: %d, Completion: %d, Total: %d",
+		atomic.LoadInt64(&t.PromptTokens),
+		atomic.LoadInt64(&t.CompletionTokens),
+		atomic.LoadInt64(&t.TotalTokens))
+}
+
+func NewTokenCallbackHandler(counter *TokenCounter) callbacks.Handler {
+	return callbacks.NewHandlerBuilder().
+		OnEndFn(func(ctx context.Context, info *callbacks.RunInfo, output callbacks.CallbackOutput) context.Context {
+			if info != nil && info.Component == components.ComponentOfChatModel {
+				mo := model.ConvCallbackOutput(output)
+				if mo != nil && mo.TokenUsage != nil {
+					counter.Add(
+						int64(mo.TokenUsage.PromptTokens),
+						int64(mo.TokenUsage.CompletionTokens),
+						int64(mo.TokenUsage.TotalTokens),
+					)
+				}
+			}
+			return ctx
+		}).
+		OnEndWithStreamOutputFn(func(ctx context.Context, info *callbacks.RunInfo, output *schema.StreamReader[callbacks.CallbackOutput]) context.Context {
+			defer output.Close()
+			if info != nil && info.Component == components.ComponentOfChatModel {
+				var lastUsage *schema.TokenUsage
+				for {
+					chunk, err := output.Recv()
+					if err != nil {
+						break
+					}
+					mo := model.ConvCallbackOutput(chunk)
+					if mo != nil && mo.Message != nil && mo.Message.ResponseMeta != nil && mo.Message.ResponseMeta.Usage != nil {
+						lastUsage = mo.Message.ResponseMeta.Usage
+					}
+				}
+				if lastUsage != nil {
+					counter.Add(
+						int64(lastUsage.PromptTokens),
+						int64(lastUsage.CompletionTokens),
+						int64(lastUsage.TotalTokens),
+					)
+				}
+			}
+			return ctx
+		}).
+		Build()
+}
+
 type Engine struct {
-	workDir    string
-	cm         model.ToolCallingChatModel
-	tools      *tools.Registry
-	backend    *localbk.Local
-	todo       *TodoManager
-	isSubAgent bool
-	history    []*schema.Message
+	workDir      string
+	cm           model.ToolCallingChatModel
+	tools        *tools.Registry
+	backend      *localbk.Local
+	todo         *TodoManager
+	isSubAgent   bool
+	history      []*schema.Message
+	tokenCounter *TokenCounter
 }
 
 func NewEngine() *Engine {
@@ -68,6 +133,18 @@ func (e *Engine) SetHistory(history []*schema.Message) *Engine {
 	return e
 }
 
+func (e *Engine) SetTokenCounter(counter *TokenCounter) *Engine {
+	e.tokenCounter = counter
+	return e
+}
+
+func (e *Engine) GetTokenUsage() string {
+	if e.tokenCounter == nil {
+		return "(no token counter)"
+	}
+	return e.tokenCounter.String()
+}
+
 func (e *Engine) GetValidTools() []tool.BaseTool {
 	return e.tools.CollectTools(func(info *schema.ToolInfo) bool {
 		switch info.Name {
@@ -84,7 +161,6 @@ func (e *Engine) GetValidTools() []tool.BaseTool {
 }
 
 func (e *Engine) AgentLoop(ctx context.Context, history *[]*schema.Message) {
-
 	agent, err := deep.New(ctx, &deep.Config{
 		Name:         "tool agent",
 		Description:  "tool agent with filesystem access via LocalBackend.",
@@ -94,7 +170,6 @@ func (e *Engine) AgentLoop(ctx context.Context, history *[]*schema.Message) {
 		ModelRetryConfig: &adk.ModelRetryConfig{
 			MaxRetries: 5,
 			IsRetryAble: func(_ context.Context, err error) bool {
-				// 429 限流错误可重试
 				return strings.Contains(err.Error(), "429") ||
 					strings.Contains(err.Error(), "Too Many Requests") ||
 					strings.Contains(err.Error(), "qpm limit")
@@ -121,7 +196,12 @@ func (e *Engine) AgentLoop(ctx context.Context, history *[]*schema.Message) {
 		EnableStreaming: true,
 	})
 
-	events := runner.Run(ctx, *history)
+	var runOpts []adk.AgentRunOption
+	if e.tokenCounter != nil {
+		runOpts = append(runOpts, adk.WithCallbacks(NewTokenCallbackHandler(e.tokenCounter)))
+	}
+
+	events := runner.Run(ctx, *history, runOpts...)
 	toolCall, content, err := printAndCollectAssistantFromEvents(events)
 	if err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, err)

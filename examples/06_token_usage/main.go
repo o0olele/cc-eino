@@ -87,13 +87,16 @@ Skills: %s`, workDir, skillLoader.Descriptions())
 		schema.SystemMessage(sysPrompt),
 	}
 
+	tokenCounter := &TokenCounter{}
+
 	app := NewEngine().
 		SetWorkDir(workDir).
 		SetChatModel(cm).
 		SetTools(toolRegistry).
 		SetBackend(backend).
 		SetTodoManager(todoMgr).
-		SetHistory(history)
+		SetHistory(history).
+		SetTokenCounter(tokenCounter)
 
 	toolRegistry.Register(ctx, NewAgentTool(app), func(ctx context.Context, args string) (string, error) {
 		return NewAgentTool(app).InvokableRun(ctx, args)
@@ -114,6 +117,7 @@ Skills: %s`, workDir, skillLoader.Descriptions())
 			app.AgentLoop(ctx, &history)
 		}
 
+		fmt.Printf("\n\033[33m%s\033[0m\n", app.GetTokenUsage())
 		fmt.Println()
 		fmt.Print("\033[36ms_full >> \033[0m")
 	}
